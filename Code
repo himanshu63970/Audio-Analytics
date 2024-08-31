@@ -1,0 +1,485 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import scrolledtext
+import speech_recognition as sr
+from transformers import pipeline
+import torch
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+import io
+import warnings
+from collections import Counter
+import re
+from langdetect import detect, LangDetectException
+
+# Suppress FutureWarnings from transformers
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Initialize the sentiment analysis pipeline
+device = 0 if torch.cuda.is_available() else -1
+sentiment_pipeline = pipeline(
+    "sentiment-analysis",
+    model="distilbert-base-uncased-finetuned-sst-2-english",
+    device=device
+)
+
+# Initialize the main application window
+root = tk.Tk()
+root.title("Audio Sentiment Analysis Dashboard")
+root.geometry("1200x900")
+root.configure(bg='#f0f0f0')
+
+def transcribe_audio(audio_path):
+    """Transcribe audio to text using speech recognition."""
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(audio_path) as source:
+        audio_data = recognizer.record(source)
+        try:
+            text = recognizer.recognize_google(audio_data)
+        except sr.UnknownValueError:
+            text = "Sorry, I could not understand the audio."
+        except sr.RequestError as e:
+            text = f"Error: {e}"
+    return text
+
+def analyze_sentiment(text):
+    """Analyze sentiment of the transcribed text."""
+    result = sentiment_pipeline(text)
+    sentiment = result[0]['label']
+    score = result[0]['score']
+    return sentiment, score
+
+def plot_sentiment(sentiments):
+    """Plot sentiment analysis results."""
+    fig, ax = plt.subplots(figsize=(4, 3))
+    sentiment_labels = ['Positive', 'Negative']
+    sentiment_scores = [0, 0]
+
+    for sentiment, score in sentiments:
+        if sentiment == 'POSITIVE':
+            sentiment_scores[0] += score
+        elif sentiment == 'NEGATIVE':
+            sentiment_scores[1] += score
+
+    ax.bar(sentiment_labels, sentiment_scores, color=['#4CAF50', '#F44336'])
+    ax.set_ylim(0, 1)
+    ax.set_ylabel('Score')
+    ax.set_title('Sentiment Analysis')
+
+    # Remove unnecessary spines
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+
+    return fig
+
+def display_plot(fig):
+    """Display matplotlib plot in tkinter window."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png')
+    buf.seek(0)
+    image = tk.PhotoImage(data=buf.getvalue())
+    plot_label.config(image=image)
+    plot_label.image = image
+    buf.close()
+
+def highlight_sentiments(text):
+    """Highlight words based on sentiment."""
+    words = re.findall(r'\w+', text)
+    positive_words = set()
+    negative_words = set()
+
+    for word in words:
+        try:
+            result = sentiment_pipeline(word)
+            sentiment = result[0]['label']
+            if sentiment == 'POSITIVE':
+                positive_words.add(word)
+            elif sentiment == 'NEGATIVE':
+                negative_words.add(word)
+        except Exception:
+            continue  # Skip words that cause errors
+
+    return positive_words, negative_words
+
+def get_repeated_words(text):
+    """Get repeated words in the text."""
+    words = re.findall(r'\w+', text.lower())
+    word_counts = Counter(words)
+    repeated_words = {word: count for word, count in word_counts.items() if count > 1}
+    return repeated_words
+
+def get_sentiment_explanation(sentiment, positive_words, negative_words):
+    """Provide explanation for the sentiment classification including specific words."""
+    if sentiment == 'POSITIVE':
+        explanation = ("The text is classified as positive because it contains words and phrases that "
+                       "express favorable sentiments or emotions. The positive words are: "
+                       f"{', '.join(positive_words) if positive_words else 'None'}.")
+    elif sentiment == 'NEGATIVE':
+        explanation = ("The text is classified as negative because it contains words and phrases that "
+                       "express unfavorable sentiments or emotions. The negative words are: "
+                       f"{', '.join(negative_words) if negative_words else 'None'}.")
+    else:
+        explanation = ("The text is classified as neutral because it contains words and phrases that are neither "
+                       "clearly positive nor negative.")
+    return explanation
+
+def update_text_area(text, sentiment, score):
+    """Update the text area with transcription, sentiment, and repeated words."""
+    positive_words, negative_words = highlight_sentiments(text)
+    repeated_words = get_repeated_words(text)
+
+    text_area.config(state=tk.NORMAL)
+    text_area.delete(1.0, tk.END)
+    text_area.insert(tk.END, "Transcription:\n")
+    text_area.insert(tk.END, text + "\n\n")
+    
+    sentiments = [(sentiment, score)]
+    fig = plot_sentiment(sentiments)
+    display_plot(fig)
+    
+    text_area.insert(tk.END, "Sentiment Analysis:\n")
+    text_area.insert(tk.END, f"Sentiment: {sentiment}\nScore: {score:.2f}\n\n")
+
+    # Explanation of sentiment
+    explanation = get_sentiment_explanation(sentiment, positive_words, negative_words)
+    text_area.insert(tk.END, f"Explanation:\n{explanation}\n\n")
+    
+    text_area.insert(tk.END, "Repeated Words:\n")
+    if repeated_words:
+        for word, count in repeated_words.items():
+            text_area.insert(tk.END, f"{word}: {count}\n")
+    else:
+        text_area.insert(tk.END, "None\n")
+    
+    # Highlight positive and negative words
+    for tag in ['POSITIVE', 'NEGATIVE']:
+        text_area.tag_remove(tag, '1.0', tk.END)  # Remove existing tags
+
+    start_index = '1.0'
+    for word in positive_words:
+        start_index = '1.0'
+        while True:
+            pos = text_area.search(rf'\b{re.escape(word)}\b', start_index, tk.END, regexp=True)
+            if not pos:
+                break
+            end_index = f"{pos}+{len(word)}c"
+            text_area.tag_add('POSITIVE', pos, end_index)
+            start_index = end_index
+    text_area.tag_configure('POSITIVE', foreground='#4CAF50')  # Green color for positive words
+
+    start_index = '1.0'
+    for word in negative_words:
+        start_index = '1.0'
+        while True:
+            pos = text_area.search(rf'\b{re.escape(word)}\b', start_index, tk.END, regexp=True)
+            if not pos:
+                break
+            end_index = f"{pos}+{len(word)}c"
+            text_area.tag_add('NEGATIVE', pos, end_index)
+            start_index = end_index
+    text_area.tag_configure('NEGATIVE', foreground='#F44336')  # Red color for negative words
+
+    text_area.config(state=tk.DISABLED)
+
+def upload_audio():
+    """Handle audio file upload, transcription, and sentiment analysis."""
+    file_path = filedialog.askopenfilename(title="Select Audio File", filetypes=[("Audio Files", "*.wav *.mp3 *.flac")])
+    if not file_path:
+        return
+
+    text_area.config(state=tk.NORMAL)
+    text_area.delete(1.0, tk.END)
+    text_area.insert(tk.END, "Transcribing audio...\n")
+    text_area.config(state=tk.DISABLED)
+    root.update()
+
+    text = transcribe_audio(file_path)
+    sentiment, score = analyze_sentiment(text)
+    
+    update_text_area(text, sentiment, score)
+
+def record_audio():
+    """Record audio, transcribe, and analyze sentiment."""
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        text_area.config(state=tk.NORMAL)
+        text_area.delete(1.0, tk.END)
+        text_area.insert(tk.END, "Recording... Speak now.")
+        text_area.config(state=tk.DISABLED)
+        root.update()
+        try:
+            audio_data = recognizer.record(source, duration=10)  # Record for 10 seconds
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred while recording: {e}")
+            return
+
+    text_area.config(state=tk.NORMAL)
+    text_area.delete(1.0, tk.END)
+    text_area.insert(tk.END, "Processing...")
+    text_area.config(state=tk.DISABLED)
+    root.update()
+
+    try:
+        text = recognizer.recognize_google(audio_data)
+        sentiment, score = analyze_sentiment(text)
+        update_text_area(text, sentiment, score)
+    except sr.UnknownValueError:
+        messagebox.showerror("Error", "Sorry, I could not understand the audio.")
+    except sr.RequestError as e:
+        messagebox.showerror("Error", f"Could not request results; {e}")
+
+def detect_language():
+    """Detect the language of the transcribed text."""
+    text = text_area.get("1.0", tk.END).strip().split("\n")[1]  # Assuming transcription is the second line
+    if not text:
+        messagebox.showwarning("Warning", "No transcription available to detect language.")
+        return
+
+    try:
+        language = detect(text)
+        language_name = LANGUAGES.get(language, "Unknown")
+        language_info = f"Detected Language: {language_name} ({language})"
+    except LangDetectException:
+        language_info = "Could not detect language."
+
+    # Insert language information below transcription
+    text_area.config(state=tk.NORMAL)
+    # Remove previous language info if exists
+    content = text_area.get("1.0", tk.END)
+    content = re.sub(r'Detected Language: .*', '', content)
+    text_area.delete("1.0", tk.END)
+    text_area.insert(tk.END, content)
+    text_area.insert(tk.END, f"\nDetected Language: {language_info}\n")
+    text_area.config(state=tk.DISABLED)
+
+# Mapping of language codes to language names
+LANGUAGES = {
+    'af': 'Afrikaans',
+    'ar': 'Arabic',
+    'bg': 'Bulgarian',
+    'bn': 'Bengali',
+    'ca': 'Catalan',
+    'cs': 'Czech',
+    'cy': 'Welsh',
+    'da': 'Danish',
+    'de': 'German',
+    'el': 'Greek',
+    'en': 'English',
+    'es': 'Spanish',
+    'et': 'Estonian',
+    'fa': 'Persian',
+    'fi': 'Finnish',
+    'fr': 'French',
+    'gu': 'Gujarati',
+    'he': 'Hebrew',
+    'hi': 'Hindi',
+    'hr': 'Croatian',
+    'hu': 'Hungarian',
+    'id': 'Indonesian',
+    'it': 'Italian',
+    'ja': 'Japanese',
+    'kn': 'Kannada',
+    'ko': 'Korean',
+    'lt': 'Lithuanian',
+    'lv': 'Latvian',
+    'mk': 'Macedonian',
+    'ml': 'Malayalam',
+    'mr': 'Marathi',
+    'ne': 'Nepali',
+    'nl': 'Dutch',
+    'no': 'Norwegian',
+    'pa': 'Punjabi',
+    'pl': 'Polish',
+    'pt': 'Portuguese',
+    'ro': 'Romanian',
+    'ru': 'Russian',
+    'sk': 'Slovak',
+    'sl': 'Slovenian',
+    'so': 'Somali',
+    'sq': 'Albanian',
+    'sv': 'Swedish',
+    'sw': 'Swahili',
+    'ta': 'Tamil',
+    'te': 'Telugu',
+    'th': 'Thai',
+    'tl': 'Tagalog',
+    'tr': 'Turkish',
+    'uk': 'Ukrainian',
+    'ur': 'Urdu',
+    'vi': 'Vietnamese',
+    'zh-cn': 'Chinese (Simplified)',
+    'zh-tw': 'Chinese (Traditional)',
+}
+
+def clear_text():
+    """Clear the text area and plot."""
+    text_area.config(state=tk.NORMAL)
+    text_area.delete(1.0, tk.END)
+    text_area.config(state=tk.DISABLED)
+    plot_label.config(image='')
+
+def exit_app():
+    """Exit the application."""
+    root.quit()
+
+def show_help():
+    """Show help information."""
+    help_text = (
+        "1. Click 'Upload Audio' to select and analyze an audio file.\n"
+        "   - Supported formats: WAV, MP3, FLAC.\n"
+        "2. Click 'Record Audio' to record audio and analyze.\n"
+        "   - Records for 10 seconds.\n"
+        "3. Click 'Detect Language' to identify the language of the transcribed text.\n"
+        "4. Use 'Clear Text' to reset the display.\n"
+        "5. Use 'Exit' to close the application."
+    )
+    messagebox.showinfo("Help", help_text)
+
+def show_settings():
+    """Show settings information."""
+    messagebox.showinfo("Settings", "Settings options are not yet implemented.")
+
+# UI Elements
+header_frame = tk.Frame(root, bg='#2196F3', pady=10)
+header_frame.pack(fill=tk.X)
+
+header_label = tk.Label(
+    header_frame,
+    text="Audio Sentiment Analysis Dashboard",
+    bg='#2196F3',
+    fg='white',
+    font=('Arial', 24, 'bold')
+)
+header_label.pack()
+
+button_frame = tk.Frame(root, bg='#f0f0f0', pady=10)
+button_frame.pack()
+
+upload_button = tk.Button(
+    button_frame,
+    text="Upload Audio",
+    command=upload_audio,
+    padx=20,
+    pady=10,
+    bg='#4CAF50',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+upload_button.pack(side=tk.LEFT, padx=5)
+
+record_button = tk.Button(
+    button_frame,
+    text="Record Audio",
+    command=record_audio,
+    padx=20,
+    pady=10,
+    bg='#2196F3',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+record_button.pack(side=tk.LEFT, padx=5)
+
+detect_lang_button = tk.Button(
+    button_frame,
+    text="Detect Language",
+    command=detect_language,
+    padx=20,
+    pady=10,
+    bg='#FF9800',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+detect_lang_button.pack(side=tk.LEFT, padx=5)
+
+clear_button = tk.Button(
+    button_frame,
+    text="Clear Text",
+    command=clear_text,
+    padx=20,
+    pady=10,
+    bg='#FFC107',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+clear_button.pack(side=tk.LEFT, padx=5)
+
+exit_button = tk.Button(
+    button_frame,
+    text="Exit",
+    command=exit_app,
+    padx=20,
+    pady=10,
+    bg='#F44336',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+exit_button.pack(side=tk.LEFT, padx=5)
+
+settings_button = tk.Button(
+    button_frame,
+    text="Settings",
+    command=show_settings,
+    padx=20,
+    pady=10,
+    bg='#9E9E9E',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+settings_button.pack(side=tk.LEFT, padx=5)
+
+help_button = tk.Button(
+    button_frame,
+    text="Help",
+    command=show_help,
+    padx=20,
+    pady=10,
+    bg='#009688',
+    fg='black',
+    font=('Arial', 12, 'bold'),
+    relief=tk.RAISED
+)
+help_button.pack(side=tk.LEFT, padx=5)
+
+text_area_frame = tk.Frame(root, bg='#f0f0f0')
+text_area_frame.pack(pady=10)
+
+text_area = scrolledtext.ScrolledText(
+    text_area_frame,
+    wrap=tk.WORD,
+    width=120,
+    height=20,
+    padx=10,
+    pady=10,
+    font=('Arial', 12),
+    bg='#ffffff',
+    fg='black',
+    state=tk.DISABLED
+)
+text_area.pack()
+
+plot_frame = tk.Frame(root, bg='#f0f0f0')
+plot_frame.pack(pady=10)
+
+plot_label = tk.Label(plot_frame, bg='#f0f0f0')
+plot_label.pack()
+
+status_bar = tk.Label(
+    root,
+    text="Ready",
+    bg='#2196F3',
+    fg='white',
+    anchor='w',
+    padx=10,
+    font=('Arial', 12)
+)
+status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+# Run the application
+root.mainloop()
